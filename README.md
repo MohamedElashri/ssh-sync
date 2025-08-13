@@ -29,12 +29,12 @@ It supports:
 
 ### 1. Install script
 ```bash
-mkdir -p ~/bin
-curl -o ~/bin/sync-ssh https://github.com/MohamedElashri/ssh-sync/raw/refs/heads/main/sync-ssh
-chmod +x ~/bin/sync-ssh
+mkdir -p ~/.local/bin
+curl -o ~/.local/bin/sync-ssh https://github.com/MohamedElashri/ssh-sync/raw/refs/heads/main/sync-ssh
+chmod +x ~/.local/bin/sync-ssh
 ````
 
-Make sure `~/bin` is in your `PATH`.
+Make sure `~/.local/bin` is in your `PATH`.
 
 ### 2. Install dependencies
 
