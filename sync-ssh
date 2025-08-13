@@ -1,64 +1,63 @@
 #!/usr/bin/env bash
-# sync-ssh: robust rsync-based code sync over SSH with optional watch mode.
-# Requirements on macOS: rsync (builtin), fswatch (for --watch: brew install fswatch)
+# sync-ssh: rsync-based sync over SSH with optional single-process two-way mode.
+# No remote installs required. macOS-friendly. Works with SSH config and jumps.
+#
+# New: --two-way runs a local watcher (push) and a remote poller (pull) in ONE process.
+# Safety defaults: no hard data loss. All overwrites/deletions on the receiving side
+# are archived in .sync-ssh/archive/<timestamp>/ (on that side).
 
 set -euo pipefail
 
-VERSION="1.2"
+VERSION="2.0"
 
 # ---------- Defaults ----------
 HOST=""
 REMOTE_PATH=""
 LOCAL_PATH=""
 DIRECTION="push"        # push|pull
-WATCH=0                 # 1 to watch local changes and push
-INTERVAL=0              # polling seconds for periodic pull if DIRECTION=pull and --watch
-FILTER_FILE=""          # optional external rsync filter
-DELETE_FLAG="--delete"  # remove extraneous files on target
-BW_LIMIT=""             # e.g. --bwlimit=20000 (KB/s)
+WATCH=0                 # 1 = run watch loop for one-way
+INTERVAL=10             # seconds (pull watch & two-way pull)
+FILTER_FILE=""          # rsync filter
+DELETE_FLAG=""          # default: NO hard delete in safe mode; enable with --hard-delete
+BW_LIMIT=""             # e.g. --bwlimit=20000
 DRY=""
-SSH_OPTS=()             # extra ssh options
+SSH_OPTS=()
 VERBOSE=0
-INIT_MODE=""            # empty|pull|push (one-time before watch)
+INIT_MODE=""            # ""|pull|push
+LIST_HOSTS_ONLY=0
+
+# Two-way
+TWO_WAY=0
+PULL_INTERVAL=10
+ARCHIVE_DIR=""          # where receiver archives overwritten/deleted files; default per run .sync-ssh/archive/<ts>
+RUN_TS="$(date +%Y%m%d-%H%M%S)"
+
+# Exclude patterns (used when no --filter)
 EXCLUDES=( ".git/" "build*/" ".venv/" "__pycache__/" "node_modules/" "*.npz" "*.txt" )
 
 # ---------- Helpers ----------
-log() { printf "[sync-ssh] %s\n" "$*" >&2; }
-die() { printf "[sync-ssh][error] %s\n" "$*" >&2; exit 1; }
+log(){ printf "[sync-ssh] %s\n" "$*" >&2; }
+die(){ printf "[sync-ssh][error] %s\n" "$*" >&2; exit 1; }
+have(){ command -v "$1" >/dev/null 2>&1; }
 
-have() { command -v "$1" >/dev/null 2>&1; }
-
-join_by() { local IFS="$1"; shift; echo "$*"; }
+join_by(){ local IFS="$1"; shift; echo "$*"; }
 
 ssh_expand_includes() {
-  # Return a newline-separated list of ssh config files, following Include globs from ~/.ssh/config
-  local seen=()
-  local queue=( "$HOME/.ssh/config" )
-  local out=()
-
+  local seen=() queue=( "$HOME/.ssh/config" ) out=()
   while ((${#queue[@]})); do
     local f="${queue[0]}"; queue=("${queue[@]:1}")
     [[ -r "$f" ]] || continue
-    # de-dup
-    local skip=0
-    for s in "${seen[@]}"; do [[ "$s" == "$f" ]] && { skip=1; break; }; done
+    local skip=0; for s in "${seen[@]}"; do [[ "$s" == "$f" ]] && { skip=1; break; }; done
     ((skip)) && continue
-    seen+=("$f")
-    out+=("$f")
-    # Parse Include lines
+    seen+=("$f"); out+=("$f")
     while IFS= read -r line; do
       [[ "$line" =~ ^[[:space:]]*Include[[:space:]]+(.+)$ ]] || continue
-      local pattern="${BASH_REMATCH[1]}"
-      # split by whitespace into globs
+      local pat="${BASH_REMATCH[1]}"
       # shellcheck disable=SC2206
-      local globs=( $pattern )
+      local globs=( $pat )
       for g in "${globs[@]}"; do
-        # Expand relative to home by default
-        if [[ "$g" != /* ]]; then g="$HOME/.ssh/$g"; fi
-        # Globbing
-        local matches=()
-        while IFS= read -r m; do matches+=("$m"); done < <(compgen -G "$g" || true)
-        for m in "${matches[@]}"; do [[ -r "$m" ]] && queue+=("$m"); done
+        [[ "$g" != /* ]] && g="$HOME/.ssh/$g"
+        while IFS= read -r m; do [[ -r "$m" ]] && queue+=("$m"); done < <(compgen -G "$g" || true)
       done
     done < "$f"
   done
@@ -66,37 +65,30 @@ ssh_expand_includes() {
 }
 
 ssh_list_hosts() {
-  # List Host entries excluding wildcards (*, ?, !), returns one per line
-  local files=()
+  local files=() hosts=()
   while IFS= read -r f; do files+=("$f"); done < <(ssh_expand_includes)
-  local hosts=()
   for f in "${files[@]}"; do
     while IFS= read -r line; do
       [[ "$line" =~ ^[[:space:]]*Host[[:space:]]+(.+)$ ]] || continue
       local rest="${BASH_REMATCH[1]}"
       for tok in $rest; do
-        # skip wildcard patterns and "?"
-        if [[ "$tok" == "*" || "$tok" == *"?"* || "$tok" == "!"* ]]; then
-          continue
-        fi
+        [[ "$tok" == "*" || "$tok" == *"?"* || "$tok" == "!"* ]] && continue
         hosts+=("$tok")
       done
     done < "$f"
   done
-  # de-dup while preserving order
   awk '!seen[$0]++' < <(printf "%s\n" "${hosts[@]}")
 }
 
 pick_host() {
   local hosts=()
   while IFS= read -r h; do hosts+=("$h"); done < <(ssh_list_hosts)
-  ((${#hosts[@]})) || die "No concrete Host entries found in your SSH config."
+  ((${#hosts[@]})) || die "No concrete Host entries found in SSH config."
   if have fzf; then
     printf "%s\n" "${hosts[@]}" | fzf --prompt="SSH host> " --height=15
   else
-    echo "Select SSH host:"
-    local i=1
-    for h in "${hosts[@]}"; do printf "%2d) %s\n" "$i" "$h"; ((i++)); done
+    echo "Select SSH host:" >&2
+    local i=1; for h in "${hosts[@]}"; do printf "%2d) %s\n" "$i" "$h" >&2; ((i++)); done
     read -r -p "Enter number: " n
     (( n>=1 && n<=${#hosts[@]} )) || die "Invalid selection."
     echo "${hosts[n-1]}"
@@ -108,77 +100,116 @@ ensure_remote_dir() {
   ssh "${SSH_OPTS[@]}" "$host" "mkdir -p -- \"${path}\""
 }
 
-rsync_common_opts() {
-  local opts=( -az ${DELETE_FLAG} --partial --human-readable )
+rsync_opts_common() {
+  local opts=( -az --partial --human-readable )
   ((VERBOSE)) && opts+=( -v )
   [[ -n "$BW_LIMIT" ]] && opts+=( "$BW_LIMIT" )
   [[ -n "$DRY" ]] && opts+=( --dry-run )
-  # Build excludes unless FILTER_FILE provided
+
   if [[ -n "$FILTER_FILE" ]]; then
     opts+=( --filter="merge $FILTER_FILE" )
   else
     for e in "${EXCLUDES[@]}"; do opts+=( --exclude "$e" ); done
-    # Optional local .syncignore
     [[ -f "$LOCAL_PATH/.syncignore" ]] && opts+=( --filter="merge $LOCAL_PATH/.syncignore" )
   fi
+
   echo "$(join_by " " "${opts[@]}")"
 }
 
-initial_sync_if_needed() {
-  case "$INIT_MODE" in
-    pull)
-      log "Initial pull: $HOST:$REMOTE_PATH -> $LOCAL_PATH"
-      rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" \
-        -- "$HOST:$REMOTE_PATH/" "$LOCAL_PATH/"
-      ;;
-    push)
-      log "Initial push: $LOCAL_PATH -> $HOST:$REMOTE_PATH"
-      rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" \
-        -- "$LOCAL_PATH/" "$HOST:$REMOTE_PATH/"
-      ;;
-    "") ;;
-    *) die "Invalid --init '$INIT_MODE' (use: pull|push)";;
-  esac
+# Build rsync command line, deciding delete/backup/archive on the RECEIVING side.
+# $1 = direction label: "push" (local->remote receiver=remote) | "pull" (remote->local receiver=local)
+rsync_with_safety() {
+  local mode="$1" src="" dst="" archive=""
+  local opts="$(rsync_opts_common)"
+
+  if [[ "$mode" == "push" ]]; then
+    src="$LOCAL_PATH/"
+    dst="$HOST:$REMOTE_PATH/"
+    # archive dir lives on remote side
+    archive="${ARCHIVE_DIR:-.sync-ssh/archive/${RUN_TS}}"
+    # ensure remote archive dir
+    ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p \"$REMOTE_PATH/$archive\""
+    # Deletion policy
+    if [[ -n "$DELETE_FLAG" ]]; then
+      opts="$opts --delete"
+    fi
+    # Back up overwrites and deletions into archive on remote
+    opts="$opts --backup --backup-dir=$archive"
+    echo rsync $opts -e "ssh ${SSH_OPTS[*]}" -- "$src" "$dst"
+  else # pull: remote -> local
+    src="$HOST:$REMOTE_PATH/"
+    dst="$LOCAL_PATH/"
+    archive="${ARCHIVE_DIR:-.sync-ssh/archive/${RUN_TS}}"
+    mkdir -p "$LOCAL_PATH/$archive"
+    if [[ -n "$DELETE_FLAG" ]]; then
+      opts="$opts --delete"
+    fi
+    opts="$opts --backup --backup-dir=$archive"
+    echo rsync $opts -e "ssh ${SSH_OPTS[*]}" -- "$src" "$dst"
+  fi
 }
 
-usage() {
+# Simple lock using mkdir; returns 0 on success and prints lockdir path
+acquire_lock() {
+  local name="$1"
+  local dir="/tmp/sync-ssh.$USER.$name.lock"
+  if mkdir "$dir" 2>/dev/null; then
+    echo "$dir"
+    return 0
+  fi
+  return 1
+}
+release_lock(){ rmdir "$1" 2>/dev/null || true; }
+
+usage(){
   cat <<EOF
 sync-ssh v${VERSION}
 Usage:
-  sync-ssh [options] --remote <host>:<path> --local <path>
+  sync-ssh [options] --remote <host>:/abs/remote/path --local /abs/local/path
 
-Options:
-  --host <ssh-host>           Choose SSH Host from ssh config (overrides --remote host part).
-  --remote <spec>             Remote spec "host:/abs/path" or just "/abs/path" when --host is set.
-  --local <path>              Local directory path (created if missing).
-  --direction <push|pull>     Default: push. Push = local -> remote, Pull = remote -> local.
-  --watch                     Watch local (for push) or poll remote every --interval seconds (for pull).
-  --interval <sec>            Remote poll interval when using --watch with --direction=pull. Default 10.
-  --filter <file>             rsync filter file (merge format). If omitted, built-in excludes are used.
-  --no-delete                 Do not delete extraneous files on target.
-  --bwlimit <KBPS>            Limit rsync bandwidth (e.g. 20000).
-  --init <pull|push>          One-time initial sync before watch or single-run.
+Common options:
+  --host <ssh-host>           Host alias from SSH config (overrides host in --remote).
+  --remote <spec>             'host:/abs/path' or '/abs/path' when --host is given.
+  --local <path>              Absolute local path (created if missing).
+  --direction <push|pull>     One-way sync mode (default: push).
+  --watch                     Continuous mode for one-way (push: watch local, pull: poll remote).
+  --interval <sec>            Poll interval for pull watch (default: 10).
+  --filter <file>             rsync filter file (merge format).
+  --hard-delete               Allow real deletions on the receiver (DISABLED by default).
+  --bwlimit <KBPS>            Bandwidth limit, e.g. 20000.
+  --init <pull|push>          One-time initial sync before continuous modes.
   --ssh-opt "<opt>"           Extra ssh option (repeatable), e.g. --ssh-opt "-J lxplus,lbgw".
+  --dry-run                   Show changes without applying.
   -v                          Verbose rsync.
-  --dry-run                   Show what would change without applying.
   --list-hosts                Print concrete SSH hosts and exit.
-  -h, --help                  Show help.
+
+Two-way mode:
+  --two-way                   Run push watcher and pull poller in a single process.
+  --pull-interval <sec>       Poll interval for two-way pull (default: 10).
+  --archive-dir <path>        Receiver-side archive dir for overwritten/deleted files.
+                              Default: .sync-ssh/archive/<timestamp> under the receiving root.
+                              (Created automatically on the receiver.)
+
+Safety defaults:
+  * No hard deletes unless you pass --hard-delete.
+  * All overwritten/deleted files on the RECEIVING side are moved to the archive dir.
 
 Examples:
-  # Pick host interactively, push while watching
-  sync-ssh --remote /home/user/projects/code --local ~/work/code --direction push --watch --init pull
+  # One-time seed, then two-way safe sync
+  sync-ssh --host sleepy-earth \\
+           --remote /data/home/melashri/iris/pvfinder-inference-cpp/UpperLimit \\
+           --local  /Users/melashri/projects/cern/UpperLimit \\
+           --direction pull --init pull
 
-  # Explicit host, one-shot push
-  sync-ssh --host sleepy-earth --remote /home/user/projects/code --local ~/work/code --direction push
-
-  # Pull loop (watch mode polls remote)
-  sync-ssh --host sleepy-earth --remote /srv/app --local ~/mirror/app --direction pull --watch --interval 15
+  sync-ssh --host sleepy-earth \\
+           --remote /data/home/melashri/iris/pvfinder-inference-cpp/UpperLimit \\
+           --local  /Users/melashri/projects/cern/UpperLimit \\
+           --two-way --pull-interval 10
 EOF
 }
 
 # ---------- Parse args ----------
 if (($#==0)); then usage; exit 1; fi
-
 while (($#)); do
   case "$1" in
     --host) HOST="$2"; shift 2;;
@@ -186,80 +217,134 @@ while (($#)); do
     --local) LOCAL_PATH="$2"; shift 2;;
     --direction) DIRECTION="$2"; shift 2;;
     --watch) WATCH=1; shift;;
-    --interval) INTERVAL="${2:-0}"; shift 2;;
+    --interval) INTERVAL="${2:-10}"; shift 2;;
     --filter) FILTER_FILE="$2"; shift 2;;
-    --no-delete) DELETE_FLAG=""; shift;;
+    --hard-delete) DELETE_FLAG="--delete"; shift;;
     --bwlimit) BW_LIMIT="--bwlimit=$2"; shift 2;;
     --dry-run) DRY="--dry-run"; shift;;
     --ssh-opt) SSH_OPTS+=( "$2" ); shift 2;;
     -v) VERBOSE=1; shift;;
     --init) INIT_MODE="$2"; shift 2;;
-    --list-hosts) ssh_list_hosts; exit 0;;
+    --list-hosts) LIST_HOSTS_ONLY=1; shift;;
+    --two-way) TWO_WAY=1; shift;;
+    --pull-interval) PULL_INTERVAL="${2:-10}"; shift 2;;
+    --archive-dir) ARCHIVE_DIR="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) die "Unknown arg: $1";;
   esac
 done
 
-# ---------- Resolve host and paths ----------
+if (( LIST_HOSTS_ONLY )); then ssh_list_hosts; exit 0; fi
+
+# Resolve host and remote path components
 if [[ -z "$HOST" ]]; then
   if [[ "$REMOTE_PATH" =~ ^([^:]+):(.*)$ ]]; then
     HOST="${BASH_REMATCH[1]}"
     REMOTE_PATH="${BASH_REMATCH[2]}"
   fi
 fi
+[[ -n "$HOST" ]] || HOST="$(pick_host)"
+[[ -n "$REMOTE_PATH" ]] || die "Missing --remote path."
+[[ -n "$LOCAL_PATH"  ]] || die "Missing --local path."
+[[ "$REMOTE_PATH" == /* ]] || die "--remote path must be absolute."
+[[ "$LOCAL_PATH"  == /* ]] || die "--local path must be absolute."
 
-if [[ -z "$HOST" ]]; then
-  HOST="$(pick_host)"
-fi
-
-[[ -n "$REMOTE_PATH" ]] || die "Missing --remote."
-[[ -n "$LOCAL_PATH"  ]] || die "Missing --local."
-[[ "$REMOTE_PATH" == /* ]] || die "--remote path must be absolute on the remote."
-
-# Create local directory if needed
 mkdir -p "$LOCAL_PATH"
 
-# Verify SSH works
+# Verify SSH
 if ! ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=10 "$HOST" true; then
-  die "SSH connection to '$HOST' failed. Check ssh config or agent."
+  die "SSH connection to '$HOST' failed."
 fi
 
-# Ensure remote exists
+# Ensure remote target exists
 ensure_remote_dir "$HOST" "$REMOTE_PATH"
 
 # Optional initial sync
-initial_sync_if_needed
+if [[ -n "$INIT_MODE" ]]; then
+  case "$INIT_MODE" in
+    pull)
+      log "Initial pull: $HOST:$REMOTE_PATH -> $LOCAL_PATH"
+      eval "$(rsync_with_safety pull)"
+      ;;
+    push)
+      log "Initial push: $LOCAL_PATH -> $HOST:$REMOTE_PATH"
+      eval "$(rsync_with_safety push)"
+      ;;
+    *) die "Invalid --init '$INIT_MODE' (use: pull|push)";;
+  esac
+fi
 
-# ---------- Execute ----------
+# ---------- Two-way mode ----------
+if (( TWO_WAY )); then
+  have fswatch || die "fswatch not found. Install with: brew install fswatch"
+
+  # Acquire separate locks to avoid overlapping rsyncs
+  PUSH_LOCK="$(acquire_lock push || true)"
+  PULL_LOCK="$(acquire_lock pull || true)"
+  [[ -n "${PUSH_LOCK:-}" ]] || die "Another push is running (lock)."
+  [[ -n "${PULL_LOCK:-}" ]] || die "Another pull is running (lock)."
+
+  cleanup(){
+    [[ -n "${PUSH_LOCK:-}" ]] && release_lock "$PUSH_LOCK"
+    [[ -n "${PULL_LOCK:-}" ]] && release_lock "$PULL_LOCK"
+    exit 0
+  }
+  trap cleanup INT TERM
+
+  log "Two-way mode started. Local watch (push) + remote poll every ${PULL_INTERVAL}s (pull)."
+  log "Safety: archives on overwrite/delete under '.sync-ssh/archive/${RUN_TS}' (unless --archive-dir given)."
+  log "Hard deletes: $( [[ -n "$DELETE_FLAG" ]] && echo ENABLED || echo DISABLED ), use --hard-delete to enable."
+
+  # Background: local watcher -> push
+  (
+    # immediate push to align quickly
+    eval "$(rsync_with_safety push)" || true
+    fswatch -or --event=Updated --event=Created --event=Removed --event=Renamed "$LOCAL_PATH" | \
+      while read -r _; do
+        eval "$(rsync_with_safety push)" || true
+      done
+  ) & PUSH_PID=$!
+
+  # Foreground: remote poll -> pull
+  while true; do
+    eval "$(rsync_with_safety pull)" || true
+    sleep "$PULL_INTERVAL"
+  done
+
+  # Should never get here unless trap fires
+  wait "$PUSH_PID" || true
+  exit 0
+fi
+
+# ---------- One-way modes ----------
 case "$DIRECTION" in
   push)
     if ((WATCH)); then
       have fswatch || die "fswatch not found. Install with: brew install fswatch"
       log "Watching local -> pushing to $HOST:$REMOTE_PATH (Ctrl-C to stop)"
-      # immediate push
-      rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" -- "$LOCAL_PATH/" "$HOST:$REMOTE_PATH/"
-      fswatch -or --event=Updated --event=Created --event=Removed --event=Renamed "$LOCAL_PATH" | while read -r _; do
-        rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" -- "$LOCAL_PATH/" "$HOST:$REMOTE_PATH/" || true
-      done
+      eval "$(rsync_with_safety push)"
+      fswatch -or --event=Updated --event=Created --event=Removed --event=Renamed "$LOCAL_PATH" | \
+        while read -r _; do
+          eval "$(rsync_with_safety push)" || true
+        done
     else
       log "One-shot push: $LOCAL_PATH -> $HOST:$REMOTE_PATH"
-      rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" -- "$LOCAL_PATH/" "$HOST:$REMOTE_PATH/"
+      eval "$(rsync_with_safety push)"
     fi
     ;;
   pull)
     if ((WATCH)); then
-      ((INTERVAL>0)) || INTERVAL=10
       log "Polling remote every ${INTERVAL}s: $HOST:$REMOTE_PATH -> $LOCAL_PATH (Ctrl-C to stop)"
       while true; do
-        rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" -- "$HOST:$REMOTE_PATH/" "$LOCAL_PATH/" || true
+        eval "$(rsync_with_safety pull)" || true
         sleep "$INTERVAL"
       done
     else
       log "One-shot pull: $HOST:$REMOTE_PATH -> $LOCAL_PATH"
-      rsync $(rsync_common_opts) -e "ssh ${SSH_OPTS[*]}" -- "$HOST:$REMOTE_PATH/" "$LOCAL_PATH/"
+      eval "$(rsync_with_safety pull)"
     fi
     ;;
   *)
-    die "Invalid --direction '$DIRECTION' (use push|pull)."
+    die "Invalid --direction '$DIRECTION' (use: push|pull)."
     ;;
 esac
