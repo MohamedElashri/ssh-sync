@@ -30,7 +30,8 @@ It supports:
 ### 1. Install script
 ```bash
 mkdir -p ~/.local/bin
-curl -o ~/.local/bin/sync-ssh https://github.com/MohamedElashri/ssh-sync/raw/refs/heads/main/sync-ssh
+curl -L -o ~/.local/bin/sync-ssh \
+  https://raw.githubusercontent.com/MohamedElashri/ssh-sync/main/sync-ssh
 chmod +x ~/.local/bin/sync-ssh
 ````
 
