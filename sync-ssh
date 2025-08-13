@@ -194,17 +194,6 @@ Safety defaults:
   * No hard deletes unless you pass --hard-delete.
   * All overwritten/deleted files on the RECEIVING side are moved to the archive dir.
 
-Examples:
-  # One-time seed, then two-way safe sync
-  sync-ssh --host sleepy-earth \\
-           --remote /data/home/melashri/iris/pvfinder-inference-cpp/UpperLimit \\
-           --local  /Users/melashri/projects/cern/UpperLimit \\
-           --direction pull --init pull
-
-  sync-ssh --host sleepy-earth \\
-           --remote /data/home/melashri/iris/pvfinder-inference-cpp/UpperLimit \\
-           --local  /Users/melashri/projects/cern/UpperLimit \\
-           --two-way --pull-interval 10
 EOF
 }
 
