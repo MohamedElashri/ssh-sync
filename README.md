@@ -1,178 +1,178 @@
 # sync-ssh
 
 `sync-ssh` is a robust, rsync-based synchronization tool for keeping a local directory and a remote directory in sync over SSH.  
-It works entirely from your local machine — **no installation or root access is required on the remote host**.  
+It requires **no installation or root access on the remote host** — only `ssh` and `rsync` must be available remotely.  
+
 It supports:
 - Host selection from your SSH config (with `Include` support)
 - One-shot **push** (local → remote) or **pull** (remote → local)
-- Continuous **watch mode** for push, or polling for pull
-- Automatic remote path creation
-- Flexible ignores via built-in patterns, `.syncignore`, or rsync filter files
-- Works with SSH agents, ProxyJump, and complex CERN-like multi-hop configs
+- Continuous **watch** mode for push, or periodic polling for pull
+- **Two-way** mode in a single process, with safety features to avoid data loss
 
 
 
 ## Features
 
-- **Zero remote dependencies**: Requires only `ssh` and `mkdir -p` on the server.
-- **SSH config aware**: Reads `~/.ssh/config` and `Include`d configs, lists concrete hosts for selection.
-- **Flexible sync directions**:
-  - **Push**: local changes go to the remote.
-  - **Pull**: remote changes fetched to local.
-- **Watch mode**: Instant push via `fswatch` or periodic pull with `--interval`.
-- **Safe by default**: Requires absolute remote paths, supports dry-run mode, can disable deletes.
-- **Network-friendly**: Bandwidth limiting and resumable transfers (`--partial`).
+- **No remote installs**: works with just `ssh` and `rsync`.
+- **SSH config aware**: reads `~/.ssh/config` and included files.
+- **Multiple modes**:
+  - **Push**: local changes → remote
+  - **Pull**: remote changes → local
+  - **Two-way**: local changes are pushed instantly, remote changes are polled and pulled
+- **Safety defaults**:
+  - No hard deletes by default (`--hard-delete` to enable)
+  - All overwritten or deleted files on the receiving side are archived with timestamps
+- **Custom ignores**:
+  - Built-in patterns (`.git/`, `build*/`, `.venv/`, etc.)
+  - `.syncignore` file in the local directory
+  - Custom rsync filter file via `--filter`
 
 
 
 ## Installation
 
-### 1. Install script
 ```bash
 mkdir -p ~/.local/bin
 curl -L -o ~/.local/bin/sync-ssh \
-  https://raw.githubusercontent.com/MohamedElashri/ssh-sync/main/sync-ssh
+  https://raw.githubusercontent.com/MohamedElashri/sync-ssh/main/sync-ssh
 chmod +x ~/.local/bin/sync-ssh
 ````
 
-Make sure `~/.local/bin` is in your `PATH`.
+Dependencies:
 
-### 2. Install dependencies
+* **Required**: `ssh`, `rsync`
+* **For watch mode**: `fswatch`
 
-* **Required**:
+  ```bash
+  brew install fswatch
+  ```
+* **Optional**: [`fzf`](https://github.com/junegunn/fzf) for fuzzy host selection
 
-  * `ssh` (macOS built-in)
-  * `rsync` (macOS built-in)
-* **For watch mode**:
-
-  * `fswatch` (macOS)
-
-    ```bash
-    brew install fswatch
-    ```
-* **Optional**:
-
-  * [`fzf`](https://github.com/junegunn/fzf) for fuzzy host selection
-
-    ```bash
-    brew install fzf
-    ```
-
+  ```bash
+  brew install fzf
+  ```
 
 
 ## Usage
 
 ```bash
-sync-ssh [options] --remote <host>:<path> --local <path>
+sync-ssh [options] --remote <host>:/absolute/remote/path --local /absolute/local/path
 ```
 
-### Options
+### Common options
 
-| Option               | Description                                                                                              |                                                           |
-| -------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `--host <ssh-host>`  | SSH host alias from your `~/.ssh/config`. Overrides host in `--remote`.                                  |                                                           |
-| `--remote <spec>`    | Remote spec in `host:/abs/path` form, or just `/abs/path` if `--host` is set. Path **must** be absolute. |                                                           |
-| `--local <path>`     | Local directory path (created if missing).                                                               |                                                           |
-| \`--direction \<push | pull>\`                                                                                                  | Sync direction. Default: `push`.                          |
-| `--watch`            | Enable watch mode (push: fswatch local; pull: periodic polling).                                         |                                                           |
-| `--interval <sec>`   | Poll interval in seconds for pull watch mode. Default: 10s.                                              |                                                           |
-| `--filter <file>`    | Use rsync filter file instead of built-in excludes.                                                      |                                                           |
-| `--no-delete`        | Do not delete extraneous files on target.                                                                |                                                           |
-| `--bwlimit <KBPS>`   | Limit bandwidth usage (in KB/s). Example: `--bwlimit 20000`.                                             |                                                           |
-| \`--init \<pull      | push>\`                                                                                                  | Perform one-time initial sync before watch or single run. |
-| `--ssh-opt "<opt>"`  | Extra SSH options (repeatable). Example: `--ssh-opt "-J lxplus,lbgw"`.                                   |                                                           |
-| `-v`                 | Verbose rsync output.                                                                                    |                                                           |
-| `--dry-run`          | Show what would change without applying.                                                                 |                                                           |
-| `--list-hosts`       | List concrete hosts from SSH config and exit.                                                            |                                                           |
-| `-h`, `--help`       | Show help.                                                                                               |                                                           |
+| Option               | Description                                                                  |                                                        |
+| -- | - |  |
+| `--host <ssh-host>`  | Host alias from SSH config (overrides the host part of `--remote`).          |                                                        |
+| `--remote <spec>`    | `host:/abs/path` or `/abs/path` when `--host` is set. Path must be absolute. |                                                        |
+| `--local <path>`     | Absolute local path (created if missing).                                    |                                                        |
+| \`--direction \<push | pull>\`                                                                      | One-way sync direction (default: push).                |
+| `--watch`            | Continuous mode. For push: watch local; for pull: poll remote.               |                                                        |
+| `--interval <sec>`   | Poll interval for pull watch mode (default: 10).                             |                                                        |
+| `--filter <file>`    | Use an rsync filter file instead of built-in excludes.                       |                                                        |
+| `--hard-delete`      | Allow real deletions on the receiving side (disabled by default).            |                                                        |
+| `--bwlimit <KBPS>`   | Limit bandwidth usage (KB/s).                                                |                                                        |
+| \`--init \<pull      | push>\`                                                                      | One-time initial sync before starting continuous mode. |
+| `--ssh-opt "<opt>"`  | Extra SSH options, e.g. `--ssh-opt "-J jump1,jump2"`.                        |                                                        |
+| `--dry-run`          | Show changes without applying.                                               |                                                        |
+| `-v`                 | Verbose rsync output.                                                        |                                                        |
+| `--list-hosts`       | List concrete SSH hosts from config and exit.                                |                                                        |
+
+### Two-way options
+
+| Option                  | Description                                                                                                                    |
+| -- |  |
+| `--two-way`             | Run push watcher and pull poller in a single process.                                                                          |
+| `--pull-interval <sec>` | Poll interval for remote changes in two-way mode (default: 10).                                                                |
+| `--archive-dir <path>`  | Receiver-side archive dir for overwritten/deleted files. Defaults to `.sync-ssh/archive/<timestamp>` under the receiving root. |
+
+
 
 ## Examples
 
-### 1. Interactive host pick, initial pull, then live push
+### One-time push
 
 ```bash
 sync-ssh \
-  --remote /home/melashri/projects/code \
-  --local ~/work/code \
-  --direction push \
-  --watch \
-  --init pull
-```
-
-* Picks SSH host from your config interactively
-* Pulls existing remote code to local (`--init pull`)
-* Watches for local changes and pushes them to the server
-
----
-
-### 2. Explicit host, one-shot push
-
-```bash
-sync-ssh \
-  --host sleepy-earth \
-  --remote /home/melashri/projects/code \
-  --local ~/work/code \
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
   --direction push
 ```
 
-Pushes the local directory to the remote once and exits.
-
-
-
-### 3. Mirror from remote every 15 seconds
+### Continuous push only
 
 ```bash
 sync-ssh \
-  --host sleepy-earth \
-  --remote /srv/app \
-  --local ~/mirror/app \
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
+  --direction push \
+  --watch
+```
+
+### Continuous pull only
+
+```bash
+sync-ssh \
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
   --direction pull \
   --watch \
   --interval 15
 ```
 
-Keeps local in sync with the remote by polling every 15 seconds.
+### Safe two-way sync in one process
 
+```bash
+# Initial pull to seed local copy
+sync-ssh \
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
+  --direction pull \
+  --init pull
 
-### 4. Multi-hop CERN-style sync
+# Start two-way sync
+sync-ssh \
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
+  --two-way \
+  --pull-interval 10
+```
+
+### Two-way with hard deletes enabled
 
 ```bash
 sync-ssh \
-  --host gpu-node \
-  --remote /data/projects/allen \
-  --local ~/lhcb/allen \
-  --direction push \
-  --ssh-opt "-J lxplus,lbgw"
+  --host myserver \
+  --remote /var/www/project \
+  --local ~/projects/project \
+  --two-way \
+  --pull-interval 10 \
+  --hard-delete
 ```
 
-Uses `ProxyJump` via `--ssh-opt` to go through multiple CERN gateways.
 
 
+## Ignore files
 
-### 5. Custom ignore list
-
-Create a `.syncignore` file in your local path:
+You can create a `.syncignore` file in the local root to define additional ignores. Example:
 
 ```
-*.root
 *.log
 tmp/
+dist/
 ```
 
-This is merged with the built-in ignores automatically.
+This file uses rsync’s filter syntax.
 
 
 
-## Tips
+## Safety and conflict handling
 
-* **Host discovery**: `--list-hosts` shows all non-wildcard hosts from your SSH config, including files referenced via `Include`.
-* **Case-sensitive files**: If your repo has paths that differ only by case, create a case-sensitive APFS sparse image and sync inside it:
-
-  ```bash
-  hdiutil create -type SPARSE -fs 'Case-sensitive APFS' -size 30g -volname devcase ~/devcase.sparseimage
-  hdiutil attach ~/devcase.sparseimage
-  ```
-* **Safety**: Use `--dry-run` to preview changes before syncing.
-* **Performance**: Exclude large generated files or build directories to speed up sync.
-
-
+* **No hard deletes by default** — files removed from one side are moved to the archive dir on the receiving side.
+* **Backups on overwrite** — when a file is overwritten, the old version is saved in the archive dir with a timestamp.
+* **Conflict resolution** — last writer wins, but backups mean you can recover any overwritten version.
