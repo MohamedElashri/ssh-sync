@@ -61,31 +61,32 @@ sync-ssh [options] --remote <host>:/absolute/remote/path --local /absolute/local
 
 ### Common options
 
-| Option               | Description                                                                  |                                                        |
-| -- | - |  |
-| `--host <ssh-host>`  | Host alias from SSH config (overrides the host part of `--remote`).          |                                                        |
-| `--remote <spec>`    | `host:/abs/path` or `/abs/path` when `--host` is set. Path must be absolute. |                                                        |
-| `--local <path>`     | Absolute local path (created if missing).                                    |                                                        |
-| \`--direction \<push | pull>\`                                                                      | One-way sync direction (default: push).                |
-| `--watch`            | Continuous mode. For push: watch local; for pull: poll remote.               |                                                        |
-| `--interval <sec>`   | Poll interval for pull watch mode (default: 10).                             |                                                        |
-| `--filter <file>`    | Use an rsync filter file instead of built-in excludes.                       |                                                        |
-| `--hard-delete`      | Allow real deletions on the receiving side (disabled by default).            |                                                        |
-| `--bwlimit <KBPS>`   | Limit bandwidth usage (KB/s).                                                |                                                        |
-| \`--init \<pull      | push>\`                                                                      | One-time initial sync before starting continuous mode. |
-| `--ssh-opt "<opt>"`  | Extra SSH options, e.g. `--ssh-opt "-J jump1,jump2"`.                        |                                                        |
-| `--dry-run`          | Show changes without applying.                                               |                                                        |
-| `-v`                 | Verbose rsync output.                                                        |                                                        |
-| `--list-hosts`       | List concrete SSH hosts from config and exit.                                |                                                        |
+| Option                       | Description                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `--host <ssh-host>`          | Host alias from SSH config (overrides the host part of `--remote`).          |
+| `--remote <spec>`            | `host:/abs/path` or `/abs/path` when `--host` is set. Path must be absolute. |
+| `--local <path>`             | Absolute local path (created if missing).                                    |
+| `--direction <push \| pull>` | One-way sync direction (default: push).                                      |
+| `--watch`                    | Continuous mode. For push: watch local; for pull: poll remote.               |
+| `--interval <sec>`           | Poll interval for pull watch mode (default: 10).                             |
+| `--filter <file>`            | Use an rsync filter file instead of built-in excludes.                       |
+| `--hard-delete`              | Allow real deletions on the receiving side (disabled by default).            |
+| `--bwlimit <KBPS>`           | Limit bandwidth usage (KB/s).                                                |
+| `--init <pull \| push>`      | One-time initial sync before starting continuous mode.                       |
+| `--ssh-opt "<opt>"`          | Extra SSH options, e.g. `--ssh-opt "-J jump1,jump2"`.                        |
+| `--dry-run`                  | Show changes without applying.                                               |
+| `-v`                         | Verbose rsync output.                                                        |
+| `--list-hosts`               | List concrete SSH hosts from config and exit.                                |
+
+---
 
 ### Two-way options
 
 | Option                  | Description                                                                                                                    |
-| -- |  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `--two-way`             | Run push watcher and pull poller in a single process.                                                                          |
 | `--pull-interval <sec>` | Poll interval for remote changes in two-way mode (default: 10).                                                                |
 | `--archive-dir <path>`  | Receiver-side archive dir for overwritten/deleted files. Defaults to `.sync-ssh/archive/<timestamp>` under the receiving root. |
-
 
 
 ## Examples
